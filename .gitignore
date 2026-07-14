@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+config.txt
+DB/Config_DB.db
+xlsx/*.xlsx
+xlsx/*.xls

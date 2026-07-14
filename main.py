@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
+from DB_conn import connect
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase
 from PySide6.QtWidgets import (
@@ -68,6 +69,11 @@ class TravelMemberWindow(QMainWindow):
             QTableWidget::item:selected { background: #ffffff; color: #111827; border: 1px solid #3975b8; }
             QTableWidget::item:selected:active { background: #ffffff; color: #111827; }
             QHeaderView::section { background: #cbd7e6; color: #172033; padding: 6px; border: 1px solid #aeb9c9; font-weight: 700; }
+            QScrollBar:horizontal { height: 18px; background: #c8d1de; border: 1px solid #8795aa; }
+            QScrollBar:vertical { width: 18px; background: #c8d1de; border: 1px solid #8795aa; }
+            QScrollBar::handle:horizontal, QScrollBar::handle:vertical { background: #526b88; border: 1px solid #34495f; border-radius: 3px; min-width: 40px; min-height: 40px; }
+            QScrollBar::handle:hover { background: #294b73; }
+            QScrollBar::add-line, QScrollBar::sub-line { background: #9eacbd; border: 1px solid #718096; }
             QProgressBar { min-height: 18px; background: #ffffff; color: #172033; border: 1px solid #8795aa; border-radius: 4px; text-align: center; }
             QProgressBar::chunk { background: #3975b8; border-radius: 3px; }
             QTextEdit { background: #101a10; color: #69e06f; border: 1px solid #253c25; }
@@ -149,6 +155,18 @@ class TravelMemberWindow(QMainWindow):
         self.event_code = QLineEdit()
         self.event_code.setPlaceholderText("조회된 행사코드 또는 수정할 행사코드")
         event_row.addWidget(self.event_code, 1)
+        event_row.addWidget(QLabel("출발일", objectName="fieldTitle"))
+        self.departure_date = QLineEdit()
+        self.departure_date.setReadOnly(True)
+        self.departure_date.setPlaceholderText("YYYY-MM-DD")
+        self.departure_date.setFixedWidth(112)
+        event_row.addWidget(self.departure_date)
+        event_row.addWidget(QLabel("도착일", objectName="fieldTitle"))
+        self.arrival_date = QLineEdit()
+        self.arrival_date.setReadOnly(True)
+        self.arrival_date.setPlaceholderText("YYYY-MM-DD")
+        self.arrival_date.setFixedWidth(112)
+        event_row.addWidget(self.arrival_date)
         event_row.addWidget(QLabel("인원당 계정수", objectName="fieldTitle"))
         self.account_count = QComboBox()
         self.account_count.addItems(["", "1계정", "2계정", "3계정", "4계정"])
@@ -197,6 +215,8 @@ class TravelMemberWindow(QMainWindow):
     def _select_trip(self, row: int, _column: int) -> None:
         event_code = self.trip_table.item(row, 4).text()
         self.event_code.setText(event_code)
+        self.departure_date.setText(self.trip_table.item(row, 2).text())
+        self.arrival_date.setText(self.trip_table.item(row, 3).text())
         self._load_preview_rows(event_code)
         self._write_log(f"항차 선택: {event_code}")
 
@@ -243,10 +263,16 @@ class TravelMemberWindow(QMainWindow):
             self.progress.setRange(0, 100)
             self.progress.setValue(100)
             self.progress.setFormat("조회 완료")
+            self.progress.setStyleSheet(
+                "QProgressBar { min-height: 18px; background: #3975b8; color: white; "
+                "border: 1px solid #294b73; border-radius: 4px; text-align: center; font-weight: 700; } "
+                "QProgressBar::chunk { background: #3975b8; border-radius: 3px; }"
+            )
         except Exception as exc:
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
             self.progress.setFormat("조회 실패")
+            self.progress.setStyleSheet("")
             QMessageBox.critical(self, "조회 오류", f"엑셀 파일을 읽지 못했어.\n{exc}")
             self._write_log(f"오류: {exc}")
 
@@ -266,16 +292,21 @@ class TravelMemberWindow(QMainWindow):
         event_text = " ".join(str(value) for value in raw.iloc[:header_row].fillna("").values.flatten())
         event_code, departure, arrival = self._extract_trip_info(event_text)
         self.event_code.setText(event_code)
+        self.departure_date.setText(departure)
+        self.arrival_date.setText(arrival)
         data = data.drop(columns=["회원번호"], errors="ignore")
         leader_count = self._normalize_tour_leader(data)
         for extra_column in EXTRA_COLUMNS:
             data[extra_column] = ""
+        no_show_count = self._normalize_no_show(data)
         self._set_member_table(data)
 
         self._write_log(f"엑셀 조회 완료: {len(data)}건 / 행사코드: {event_code or '미확인'}")
         self._write_log(f"출발일: {departure or '미확인'} / 도착일: {arrival or '미확인'}")
         if leader_count:
             self._write_log(f"TOUR LEADER 변환: {leader_count}건")
+        if no_show_count:
+            self._write_log(f"노쇼 여행상태 반영: {no_show_count}건")
 
     @staticmethod
     def _normalize_tour_leader(data: pd.DataFrame) -> int:
@@ -286,6 +317,17 @@ class TravelMemberWindow(QMainWindow):
         if count:
             data.loc[mask, "회원코드"] = "TOUR LEADER"
             data.loc[mask, "예약상태"] = ""
+        return count
+
+    @staticmethod
+    def _normalize_no_show(data: pd.DataFrame) -> int:
+        memo_column = next((column for column in ("메모", "Memo") if column in data.columns), None)
+        if memo_column is None or "여행상태" not in data.columns:
+            return 0
+        mask = data[memo_column].astype(str).str.contains("노쇼", na=False)
+        count = int(mask.sum())
+        if count:
+            data.loc[mask, "여행상태"] = "노쇼"
         return count
 
     @staticmethod
@@ -345,8 +387,8 @@ class TravelMemberWindow(QMainWindow):
         for column_index, column in enumerate(data.columns):
             if str(column) in EXTRA_COLUMNS:
                 header_item = self.member_table.horizontalHeaderItem(column_index)
-                header_item.setBackground(QColor("#f4d58d"))
-                header_item.setForeground(QColor("#3b2f12"))
+                header_item.setBackground(QColor("#b7e4c7"))
+                header_item.setForeground(QColor("#123524"))
         self.member_table.setRowCount(len(data))
         for row_index, (_, row) in enumerate(data.iterrows()):
             for column_index, value in enumerate(row.tolist()):
@@ -383,8 +425,142 @@ class TravelMemberWindow(QMainWindow):
             self._write_log("검토할 엑셀 데이터가 없어.")
             QMessageBox.information(self, "③ 검토", "먼저 엑셀 파일을 조회해줘.")
             return
-        self._write_log(f"검토 대상: {self.member_table.rowCount()}건")
-        self._write_log("회원번호 1~4와 여행상태를 확인해줘.")
+        account_text = self.account_count.currentText().strip()
+        if not account_text:
+            QMessageBox.warning(self, "③ 검토", "인원당 계정수를 선택해줘.")
+            self._write_log("검토 중단: 인원당 계정수가 선택되지 않았어.")
+            return
+
+        try:
+            account_count = int(account_text.replace("계정", ""))
+            member_index = self._table_column_index("회원코드")
+            code_values = {
+                self.member_table.item(row, member_index).text().strip().lower()
+                for row in range(self.member_table.rowCount())
+                if self.member_table.item(row, member_index)
+                and self.member_table.item(row, member_index).text().strip()
+            }
+            member_codes = sorted(code for code in code_values if code != "tour leader")
+            self._write_log(f"검토 대상: {self.member_table.rowCount()}건 / 회원코드: {len(member_codes)}개")
+            if not member_codes:
+                self._write_log("검토 완료: DB 조회가 필요한 일반 회원코드가 없어.")
+                return
+
+            self.progress.setRange(0, 0)
+            self.progress.setFormat("DB 검토 중...")
+            member_dict, quantity_dict = self._load_member_accounts(member_codes)
+            errors = self._allocate_accounts(member_dict, quantity_dict, account_count, member_index)
+            self.progress.setRange(0, 100)
+            self.progress.setValue(100)
+            self.progress.setFormat("검토 완료")
+            self.progress.setStyleSheet(
+                "QProgressBar { min-height: 18px; background: #3975b8; color: white; "
+                "border: 1px solid #294b73; border-radius: 4px; text-align: center; font-weight: 700; } "
+                "QProgressBar::chunk { background: #3975b8; border-radius: 3px; }"
+            )
+            if errors:
+                self._write_log(f"검토 완료: 오류 {errors}건")
+            else:
+                self._write_log("검토 완료: 계정 배분에 문제가 없어.")
+        except Exception as exc:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+            self.progress.setFormat("검토 실패")
+            self.progress.setStyleSheet("")
+            QMessageBox.critical(self, "③ 검토 오류", str(exc))
+            self._write_log(f"검토 오류: {exc}")
+
+    def _load_member_accounts(self, member_codes: list[str]) -> tuple[dict[str, list[str]], dict[str, int]]:
+        placeholders = ",".join("?" for _ in member_codes)
+        query = f"""
+            SELECT LOWER(me.memberno), LOWER(me.id)
+            FROM member AS me
+            INNER JOIN goods AS gu ON me.goods = gu.Goods_ID
+            WHERE me.memtype IN (?, ?)
+              AND LOWER(me.memberno) IN ({placeholders})
+            UNION
+            SELECT LOWER(me.memberno), LOWER(me.id)
+            FROM member AS me
+            LEFT JOIN goods AS gu ON me.Goods = gu.goods_id
+            WHERE gu.Goods_ID = ?
+              AND me.memtype <> ?
+              AND LOWER(me.memberno) IN ({placeholders})
+            ORDER BY 1, 2
+        """
+        params = ["정상", "만기", *member_codes, "undecided", "행사", *member_codes]
+        quantity_query = f"""
+            SELECT LOWER(me.memberno), 4 / NULLIF(CONVERT(INT, gu.G_etc_str5), 0)
+            FROM member AS me
+            INNER JOIN goods AS gu ON me.goods = gu.Goods_ID
+            WHERE me.memtype IN (?, ?)
+              AND LOWER(me.memberno) IN ({placeholders})
+            UNION
+            SELECT LOWER(me.memberno), 4 / NULLIF(CONVERT(INT, gu.G_etc_str5), 0)
+            FROM member AS me
+            LEFT JOIN goods AS gu ON me.Goods = gu.goods_id
+            WHERE gu.Goods_ID = ?
+              AND me.memtype <> ?
+              AND LOWER(me.memberno) IN ({placeholders})
+        """
+        quantity_params = params
+        self._write_log("DB 연결 및 회원 계정 조회를 시작해.")
+        with connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            cursor.execute(quantity_query, quantity_params)
+            quantity_rows = cursor.fetchall()
+
+        member_dict: dict[str, list[str]] = {}
+        for member_code, account_id in rows:
+            member_dict.setdefault(str(member_code).lower(), []).append(str(account_id))
+        quantity_dict: dict[str, int] = {}
+        for member_code, quantity in quantity_rows:
+            if quantity is not None:
+                quantity_dict[str(member_code).lower()] = max(1, int(quantity))
+        self._write_log(f"DB 조회 완료: 회원 {len(member_dict)}개 / 계정 {sum(len(v) for v in member_dict.values())}개")
+        return member_dict, quantity_dict
+
+    def _allocate_accounts(
+        self,
+        member_dict: dict[str, list[str]],
+        quantity_dict: dict[str, int],
+        account_count: int,
+        member_index: int,
+    ) -> int:
+        account_columns = [self._table_column_index(name) for name in ("회원번호 1", "회원번호 2", "회원번호 3", "회원번호 4")]
+        errors = 0
+        for row in range(self.member_table.rowCount()):
+            code_item = self.member_table.item(row, member_index)
+            member_code = code_item.text().strip().lower() if code_item else ""
+            if not member_code or member_code == "tour leader":
+                continue
+            if member_code not in member_dict or member_code not in quantity_dict:
+                self._write_log(f"오류: 회원코드 {member_code}의 계정 정보를 찾지 못했어. (행 {row + 1})")
+                errors += 1
+                continue
+            needed = account_count // quantity_dict[member_code]
+            if needed <= 0 or len(member_dict[member_code]) < needed:
+                self._write_log(f"오류: 계정 부족 - {member_code} (필요 {needed}개, 보유 {len(member_dict[member_code])}개)")
+                errors += 1
+                continue
+            for column_index in account_columns:
+                self.member_table.setItem(row, column_index, QTableWidgetItem(""))
+            for offset in range(min(needed, len(account_columns))):
+                self.member_table.setItem(row, account_columns[offset], QTableWidgetItem(member_dict[member_code].pop(0)))
+
+        leftovers = [code for code, accounts in member_dict.items() if accounts]
+        if leftovers:
+            self._write_log(f"오류: 계정 분리가 필요한 회원코드 - {', '.join(leftovers)}")
+            errors += len(leftovers)
+        return errors
+
+    def _table_column_index(self, header: str) -> int:
+        for column in range(self.member_table.columnCount()):
+            item = self.member_table.horizontalHeaderItem(column)
+            if item and item.text() == header:
+                return column
+        raise ValueError(f"테이블에서 '{header}' 컬럼을 찾지 못했어.")
 
     def _apply_data(self) -> None:
         if self.member_table.rowCount() == 0:

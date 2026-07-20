@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +12,13 @@ import pyodbc
 import requests
 
 
-BASE_DIR = Path(__file__).resolve().parent
+SOURCE_DIR = Path(__file__).resolve().parent
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", SOURCE_DIR))
+BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else SOURCE_DIR
 DB_DIR = BASE_DIR / "DB"
 DB_FILE = "Config_DB.db"
 CONFIG_NAME = "HD_MSSQL"
-CONFIG_TXT = BASE_DIR / "config.txt"
+CONFIG_TXT = BASE_DIR / "config.txt" if (BASE_DIR / "config.txt").exists() else BUNDLE_DIR / "config.txt"
 
 
 def load_config_txt(filepath: str | os.PathLike[str] = CONFIG_TXT) -> dict[str, str]:

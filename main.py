@@ -102,6 +102,7 @@ class TravelMemberWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("여행고객 CRM 등록 (항차별)")
         self.resize(1700, 950)
+        self._base_data_saved = False
         self._saved_parent_seq_by_row: list[int] = []
 
         self.setStyleSheet(
@@ -921,11 +922,15 @@ class TravelMemberWindow(QMainWindow):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with connect() as connection:
             cursor = connection.cursor()
+            current_row = 0
+            current_account = ""
+            current_stage = "적용 준비"
             try:
                 goods_cache: dict[tuple[str, str, str], str] = {}
                 processed_ids: set[str] = set()
                 applied_accounts = 0
                 for row in range(self.member_table.rowCount()):
+                    current_row = row + 1
                     parent_seq = self._saved_parent_seq_by_row[row]
                     customer_name = self._table_text(row, header_indexes.get("이름")) or self._table_text(row, header_indexes.get("회원명"))
                     member_code = self._table_text(row, header_indexes.get("회원코드"))
@@ -953,6 +958,8 @@ class TravelMemberWindow(QMainWindow):
                         account_id = self._table_text(row, account_column).strip()
                         if not account_id:
                             continue
+                        current_account = account_id
+                        current_stage = "회원번호 배정 저장"
                         cursor.execute(
                             """INSERT INTO dbo.Tour_Member_Account
                             (TourMemberSeqNo, EventCode, DepartureDate, ArrivalDate,
@@ -965,24 +972,33 @@ class TravelMemberWindow(QMainWindow):
                         goods_key = (region, departure, arrival)
                         et_gid = goods_cache.get(goods_key)
                         if et_gid is None:
+                            current_stage = "여행상품 저장"
                             et_gid = self._get_or_create_et_goods(cursor, event_code, region, departure, arrival, now)
                             goods_cache[goods_key] = et_gid
+                        current_stage = "행사번호 확인"
                         result_kind, set_num = self._get_event_num(cursor, account_id, departure)
                         if result_kind == "NEW":
+                            current_stage = "행사 저장"
                             self._insert_event(cursor, account_id, customer_name, departure, et_gid, set_num, event_code, travel_status, now)
+                        current_stage = "여행자 저장"
                         self._insert_event_traveler(cursor, account_id, set_num, customer_name, phone, customer_values, now)
+                        current_stage = "행사비용 저장"
                         self._upsert_event_expenses(cursor, account_id, set_num, expense_values, now)
                         if account_id not in processed_ids:
-                            self._update_member_status(cursor, account_id, departure, now)
+                            current_stage = "회원상태 및 메모 저장"
+                            member_status = "노쇼" if travel_status == "노쇼" else "행사"
+                            self._update_member_status(cursor, account_id, departure, member_status, now)
                             processed_ids.add(account_id)
                         applied_accounts += 1
                 if applied_accounts == 0:
                     raise ValueError("저장할 회원번호가 없어.")
                 connection.commit()
                 self._write_log(f"Tour_Member_Account 및 행사자료 저장 완료: {applied_accounts}건")
-            except Exception:
+            except Exception as exc:
                 connection.rollback()
-                raise
+                raise RuntimeError(
+                    f"{current_row}행 / 회원번호 {current_account or '-'} / {current_stage} 단계에서 실패했어.\n{exc}"
+                ) from exc
 
     @staticmethod
     def _get_or_create_et_goods(cursor, event_code: str, region: str, departure: str, arrival: str, now: str) -> str:
@@ -1011,7 +1027,7 @@ class TravelMemberWindow(QMainWindow):
     @staticmethod
     def _insert_event(cursor, account_id: str, customer_name: str, departure: str, et_gid: str, set_num: int, event_code: str, travel_status: str, now: str) -> None:
         columns = "ID,Name,ECode,EName,EDate,ETime,EventType,ECharge_ID,EADate,EATime,EventPos,Remark,LunarEBDate,LeapMonth,EBDate,EBTimeGu,EBTime,Photo_Date,Photo_Time,EDCharge_ID,EDStep_ID1,EDStep_ID2,EDStep_ID3,Relation,Bigo,EReg_Date,SMS_EventYN,BalInDate,JangMooType,JangMoo,ShroudType,Shroud,ImJongJi,JangJi,Sex,SangJu,SangJuTel,Num,etc_str1,etc_str2,etc_str3,etc_str4,etc_str5,Area,Used_Money,cGoodsCnt,TravelPay,EGubun"
-        values = [account_id, customer_name, "완료", customer_name, departure, "", "노쇼" if travel_status == "노쇼" else "여행", "", departure, "", et_gid, "", "", "0", "", "", "", "", "", "여행", "여행", "회원", "", "", "", now, 0, "0", 0, "0", 0, "0", "", 0, "", "", "", set_num, "", "", "", "", event_code, "", "", 1, "", ""]
+        values = [account_id, customer_name, "완료", customer_name, departure, "", "노쇼" if travel_status == "노쇼" else "여행", "", departure, "", et_gid, "", "", "0", "", "", "", "", "", "여행", "여행", "회원", "", "", "", now[:10], 0, "0", 0, "0", 0, "0", "", 0, "", "", "", set_num, "", "", "", "", event_code, "", "", 1, "", ""]
         cursor.execute(f"INSERT INTO dbo.Event ({columns}) VALUES ({','.join('?' for _ in values)})", values)
 
     @staticmethod
@@ -1025,29 +1041,50 @@ class TravelMemberWindow(QMainWindow):
 
     @staticmethod
     def _upsert_event_expenses(cursor, account_id: str, set_num: int, expense_values: list[object], now: str) -> None:
-        columns = ["PortCh", "FuelSurCha", "ExcRateAddCha", "IntraTip", "RoomUpCha", "AirUpCha", "VisaCha", "EtcCha1"]
+        amount_columns = ["PortCh", "FuelSurCha", "ExcRateAddCha", "IntraTip", "RoomUpCha", "AirUpCha", "VisaCha", "EtcCha1"]
+        numeric_columns = [
+            "PrePay", "SupPay", "PortCh", "FuelSurCha", "ExcRateAddCha", "IntraTip",
+            "RoomUpYN", "RoomUpCha", "AirUpYN", "AirUpCha", "VisaCha", "RoomDCCha",
+            "AirAddCha", "SpeAddCha", "AirDCCha", "OneTimePay", "Penalty", "EtcCha1",
+            "EtcCha2", "EtcCha3", "EtcCha4", "EtcCha5",
+        ]
+        amount_values = [0 if value is None else value for value in expense_values]
+        values_by_column = dict(zip(amount_columns, amount_values))
+        values_by_column["RoomUpYN"] = 1 if float(values_by_column["RoomUpCha"] or 0) > 0 else 0
+        values_by_column["AirUpYN"] = 1 if float(values_by_column["AirUpCha"] or 0) > 0 else 0
+        write_columns = [*amount_columns, "RoomUpYN", "AirUpYN"]
+        write_values = [values_by_column[column] for column in write_columns]
         cursor.execute("SELECT 1 FROM dbo.Event_Expenses WHERE ID=? AND Num=?", account_id, set_num)
         if cursor.fetchone():
-            cursor.execute(f"UPDATE dbo.Event_Expenses SET {','.join(f'{column}=?' for column in columns)}, Modi_Date=?, UsrID='Admin' WHERE ID=? AND Num=?", [*expense_values, now, account_id, set_num])
+            unmapped_columns = [column for column in numeric_columns if column not in write_columns]
+            set_clauses = [*(f"{column}=?" for column in write_columns)]
+            set_clauses.extend(f"{column}=ISNULL({column},0)" for column in unmapped_columns)
+            set_clauses.extend(["Modi_Date=?", "UsrID='Admin'"])
+            cursor.execute(
+                f"UPDATE dbo.Event_Expenses SET {','.join(set_clauses)} WHERE ID=? AND Num=?",
+                [*write_values, now, account_id, set_num],
+            )
             return
-        insert_columns = "ID,Num," + ",".join(columns) + ",Save_Date,Modi_Date,UsrID"
-        row = [account_id, set_num, *expense_values, now, now, "Admin"]
+        numeric_values = {column: 0 for column in numeric_columns}
+        numeric_values.update(values_by_column)
+        insert_columns = "ID,Num," + ",".join(numeric_columns) + ",Save_Date,Modi_Date,UsrID"
+        row = [account_id, set_num, *(numeric_values[column] for column in numeric_columns), now, now, "Admin"]
         cursor.execute(f"INSERT INTO dbo.Event_Expenses ({insert_columns}) VALUES ({','.join('?' for _ in row)})", row)
 
     @staticmethod
-    def _update_member_status(cursor, account_id: str, departure: str, now: str) -> None:
+    def _update_member_status(cursor, account_id: str, departure: str, member_status: str, now: str) -> None:
         cursor.execute("SELECT memtype FROM dbo.member WHERE ID=?", account_id)
         found = cursor.fetchone()
         if not found:
             return
         old_memtype = str(found[0] or "")
-        cursor.execute("UPDATE dbo.member SET memtype=? WHERE ID=?", "행사", account_id)
+        cursor.execute("UPDATE dbo.member SET memtype=? WHERE ID=?", member_status, account_id)
         cursor.execute("SELECT 1 FROM dbo.TransMType WHERE ID=? AND EDate=?", account_id, departure)
         if cursor.fetchone():
-            cursor.execute("UPDATE dbo.TransMType SET EMemType=? WHERE ID=? AND EDate=?", "행사", account_id, departure)
+            cursor.execute("UPDATE dbo.TransMType SET EMemType=? WHERE ID=? AND EDate=?", member_status, account_id, departure)
         else:
-            cursor.execute("INSERT INTO dbo.TransMType (EDate,ID,EMemType) VALUES (?,?,?)", departure, account_id, "행사")
-        memo = f"여행 등록처리 완료 : {old_memtype} → 행사"
+            cursor.execute("INSERT INTO dbo.TransMType (EDate,ID,EMemType) VALUES (?,?,?)", departure, account_id, member_status)
+        memo = f"여행 등록처리 완료 : {old_memtype} → {member_status}"
         cursor.execute("INSERT INTO dbo.M_Memo (Note_Date,Note_time,Charge_ID,ID,TMemo,Save_Date,Modi_Date,TelCall_Gu,TelCall_ErrGu,TelCall_Mem,Memo_GuBun,ProDate,M_Submit,M_PayNum,etc_str1) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", now[:10], now[11:], "Admin", account_id, memo, now, now, "여행등록처리", "기타", "", "0", "", "OTHER", 0, 0)
 
     def _export_to_excel(self) -> None:

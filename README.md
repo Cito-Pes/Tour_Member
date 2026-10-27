@@ -55,7 +55,7 @@
 | 비자(금액) | VisaCha |
 | 추가금액 | EtcCha1 |
 
-`Event_Expenses`의 숫자형 컬럼은 빈 값일 때 `0`으로 저장한다. `RoomUpCha`가 0보다 크면 `RoomUpYN=1`, `AirUpCha`가 0보다 크면 `AirUpYN=1`로 저장하고, 그렇지 않으면 각각 `0`으로 저장한다.
+`Event_Expenses`의 숫자형 컬럼은 빈 값일 때 `0`으로 저장한다. Excel 금액은 선택한 인원당 계정수로 나눈 금액을 계정별로 저장하고, 나머지는 마지막 회원번호 계정에 더해 원금 합계를 보존한다. `RoomUpCha`가 0보다 크면 `RoomUpYN=1`, `AirUpCha`가 0보다 크면 `AirUpYN=1`로 저장하고, 그렇지 않으면 각각 `0`으로 저장한다.
 
 ## 프로젝트 실행
 

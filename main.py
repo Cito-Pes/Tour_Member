@@ -919,6 +919,10 @@ class TravelMemberWindow(QMainWindow):
         departure = self.departure_date.text().strip()
         arrival = self.arrival_date.text().strip()
         region = self.travel_region.text().strip()
+        account_divisor_text = self.account_count.currentText().replace("계정", "").strip()
+        if not account_divisor_text.isdigit() or int(account_divisor_text) <= 0:
+            raise ValueError("인원당 계정수가 올바르게 선택되지 않았어.")
+        account_divisor = int(account_divisor_text)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with connect() as connection:
             cursor = connection.cursor()
@@ -954,10 +958,12 @@ class TravelMemberWindow(QMainWindow):
                         self._db_value("비자(금액)", self._table_text(row, header_indexes.get("비자(금액)"))),
                         self._db_value("추가금액", self._table_text(row, header_indexes.get("추가금액"))),
                     ]
-                    for order, account_column in enumerate(account_columns, start=1):
-                        account_id = self._table_text(row, account_column).strip()
-                        if not account_id:
-                            continue
+                    account_entries = [
+                        (order, account_column, self._table_text(row, account_column).strip())
+                        for order, account_column in enumerate(account_columns, start=1)
+                    ]
+                    account_entries = [entry for entry in account_entries if entry[2]]
+                    for account_position, (order, account_column, account_id) in enumerate(account_entries, start=1):
                         current_account = account_id
                         current_stage = "회원번호 배정 저장"
                         cursor.execute(
@@ -983,7 +989,13 @@ class TravelMemberWindow(QMainWindow):
                         current_stage = "여행자 저장"
                         self._insert_event_traveler(cursor, account_id, set_num, customer_name, phone, customer_values, now)
                         current_stage = "행사비용 저장"
-                        self._upsert_event_expenses(cursor, account_id, set_num, expense_values, now)
+                        account_expense_values = self._split_expense_values(
+                            expense_values,
+                            account_divisor,
+                            account_position,
+                            len(account_entries),
+                        )
+                        self._upsert_event_expenses(cursor, account_id, set_num, account_expense_values, now)
                         if account_id not in processed_ids:
                             current_stage = "회원상태 및 메모 저장"
                             member_status = "노쇼" if travel_status == "노쇼" else "행사"
@@ -1038,6 +1050,30 @@ class TravelMemberWindow(QMainWindow):
         columns = "ID,Num,ETGuBun,Name_K,Sex,Name_EF,Name_EL,BirthDay,CabinType,Tel,EMail,PassPortNo,PassPortEDate,Save_Date,Modi_Date,UsrID"
         row = [account_id, set_num, "기본", customer_name, "", values["영문성"], values["영문이름"], values["생년월일"], values["객실종류"], phone, "", values["여권번호"], values["여권만료일"], now, now, "Admin"]
         cursor.execute(f"INSERT INTO dbo.Event_Traveler ({columns}) VALUES ({','.join('?' for _ in row)})", row)
+
+    @staticmethod
+    def _split_expense_values(
+        expense_values: list[object],
+        account_divisor: int,
+        account_position: int = 1,
+        account_count: int | None = None,
+    ) -> list[object]:
+        if account_divisor <= 0:
+            raise ValueError("행사비용 분모는 1 이상이어야 해.")
+        if account_count is None:
+            account_count = account_divisor
+        if account_count <= 0 or not 1 <= account_position <= account_count:
+            raise ValueError("행사비용 계정 순번이 올바르지 않아.")
+        divided_values: list[object] = []
+        for value in expense_values:
+            amount = 0 if value is None else int(float(value))
+            base_amount = int(amount / account_divisor)
+            if account_position == account_count:
+                remainder_amount = amount - (base_amount * (account_count - 1))
+                divided_values.append(remainder_amount)
+            else:
+                divided_values.append(base_amount)
+        return divided_values
 
     @staticmethod
     def _upsert_event_expenses(cursor, account_id: str, set_num: int, expense_values: list[object], now: str) -> None:
